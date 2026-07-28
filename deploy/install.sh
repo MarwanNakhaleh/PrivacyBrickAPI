@@ -46,7 +46,10 @@ ln -sf "${INSTALL_DIR}/venv/bin/privacybrick-pair" /usr/local/bin/privacybrick-p
 install -m 755 "${REPO_DIR}/deploy/privacybrick-logs" /usr/local/bin/privacybrick-logs
 
 systemctl daemon-reload
-systemctl enable --now privacybrick-api
+systemctl enable privacybrick-api
+# restart (not `enable --now`): an already-running service must be bounced
+# to load the code this script just installed.
+systemctl restart privacybrick-api
 
 echo
 echo "==> PrivacyBrick API is running on port 8787."
