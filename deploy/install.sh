@@ -34,8 +34,9 @@ PRIVACYBRICK_ADGUARD_PASSWORD=
 PRIVACYBRICK_NTOPNG_URL=http://127.0.0.1:3001
 PRIVACYBRICK_NTOPNG_TOKEN=
 
-# systemd unit providing DNS-over-HTTPS (cloudflared, https-dns-proxy, or blank)
-PRIVACYBRICK_DOH_SERVICE_UNIT=cloudflared
+# systemd unit carrying encrypted DNS upstream. With the provisioned stack
+# this is unbound itself (DNS-over-TLS forwarding); blank disables the card.
+PRIVACYBRICK_DOH_SERVICE_UNIT=unbound
 EOF
   chmod 600 "${STATE_DIR}/.env"
   echo "==> Wrote default config to ${STATE_DIR}/.env — edit it to add AdGuard credentials."

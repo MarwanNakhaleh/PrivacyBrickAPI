@@ -1,7 +1,7 @@
 # PrivacyBrickAPI
 
 The local control-plane API for a **PrivacyBrick** — a Raspberry Pi (DietPi)
-plugged into your router that runs Unbound, AdGuard Home, DNS-over-HTTPS,
+plugged into your router that runs Unbound (with DNS-over-TLS), AdGuard Home,
 Tailscale, ntopng, and the NextDNS CLI.
 
 **It runs on the Pi itself. There is no cloud, no centralized server, and no
@@ -50,7 +50,7 @@ To pair another phone later: `privacybrick-pair`
 |------------------|-----------------|-----------|
 | Ad Blocking      | AdGuard Home    | local REST API (`/control/...`) |
 | Private DNS      | Unbound         | `unbound-control` |
-| Encrypted DNS    | DoH (cloudflared / https-dns-proxy) | systemd unit status |
+| Encrypted DNS    | Unbound DoT forwarding | systemd unit status |
 | Remote Access    | Tailscale       | `tailscale` CLI (`--json`) |
 | Cloud Filtering  | NextDNS         | `nextdns` CLI |
 | Network Monitor  | ntopng          | local REST API (`/lua/rest/v2/...`) |

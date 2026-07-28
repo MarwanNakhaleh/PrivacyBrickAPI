@@ -4,7 +4,7 @@
 into a complete PrivacyBrick. Run it as root from a clone of this repo:
 
 ```bash
-sudo bash deploy/provision.sh              # default: Unbound forwards to cloudflared (DoH)
+sudo bash deploy/provision.sh              # default: Unbound forwards over DNS-over-TLS
 sudo bash deploy/provision.sh --recursive  # Unbound does full recursion itself
 ```
 
@@ -16,9 +16,8 @@ config file it would change is backed up first as `<file>.bak.<epoch>`.
 
 | Component | Source |
 |---|---|
-| Unbound | Debian apt |
+| Unbound | Debian apt (also carries encrypted DNS via native DoT forwarding) |
 | AdGuard Home | official installer (`raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh`) |
-| cloudflared | Cloudflare apt repo (`pkg.cloudflare.com/cloudflared`) |
 | Tailscale | Tailscale apt repo (`pkgs.tailscale.com/stable/debian`, bookworm) |
 | ntopng | ntop apt repo (`packages.ntop.org`) if reachable, else Debian apt |
 | NextDNS CLI | official installer (`nextdns.io/install`) |
@@ -36,20 +35,23 @@ Default (**forward** mode):
 LAN clients / router
         │  port 53
         ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────────┐
-│  AdGuard Home   │───▶│     Unbound      │───▶│  cloudflared (DoH)      │
-│  0.0.0.0:53     │    │  127.0.0.1:5335  │    │  127.0.0.1:5053         │
-│  (ad blocking)  │    │  (cache)         │    │  → cloudflare-dns.com   │
-└─────────────────┘    └──────────────────┘    │  → dns.quad9.net        │
-                                               └─────────────────────────┘
+┌─────────────────┐    ┌──────────────────────────────┐
+│  AdGuard Home   │───▶│     Unbound                  │──▶ DNS-over-TLS :853
+│  0.0.0.0:53     │    │  127.0.0.1:5335              │     → 1.1.1.1 / 1.0.0.1
+│  (ad blocking)  │    │  (cache + DoT forwarding)    │     → 9.9.9.9 / 149.112.112.112
+└─────────────────┘    └──────────────────────────────┘
 
 standby (not in chain):  NextDNS CLI on 127.0.0.1:5054
 ```
 
+Encrypted DNS is Unbound's own `forward-tls-upstream` — there is no separate
+DoH daemon. (Earlier versions used `cloudflared proxy-dns`, a feature
+Cloudflare discontinued in Nov 2025; the script removes that leftover unit
+on re-runs.)
+
 With **`--recursive`**: Unbound resolves directly from the root servers
 (no forward zone) with DNSSEC validation via the auto-managed trust anchor
-(`/var/lib/unbound/root.key`). cloudflared is still installed and running but
-**unused**.
+(`/var/lib/unbound/root.key`). Upstream traffic is plain DNS — not encrypted.
 
 ## Ports
 
@@ -59,8 +61,7 @@ flag or environment variable (flag wins):
 | Default | Service | Bound to | Flag / env var | Purpose |
 |---|---|---|---|---|
 | 53 | AdGuard Home | 0.0.0.0 | `--adguard-dns-port` / `ADGUARD_DNS_PORT` | DNS for the LAN |
-| 5335 | Unbound | 127.0.0.1 | `--unbound-port` / `UNBOUND_PORT` | caching resolver behind AdGuard |
-| 5053 | cloudflared | 127.0.0.1 | `--cloudflared-port` / `CLOUDFLARED_PORT` | DoH proxy (unused with `--recursive`) |
+| 5335 | Unbound | 127.0.0.1 | `--unbound-port` / `UNBOUND_PORT` | caching resolver behind AdGuard, DoT upstream |
 | 5054 | NextDNS CLI | 127.0.0.1 | `--nextdns-port` / `NEXTDNS_PORT` | alternative upstream, standby only |
 | 3000 | AdGuard Home | 0.0.0.0 | `--adguard-ui-port` / `ADGUARD_UI_PORT` | web UI / REST API |
 | 3001 | ntopng | 0.0.0.0 | `--ntopng-port` / `NTOPNG_PORT` | web UI / REST API |
@@ -86,8 +87,8 @@ Two behaviors worth knowing:
 ## Flags
 
 - `--recursive` — configure Unbound for full recursion (no forwarding,
-  DNSSEC trust anchor) instead of forwarding to cloudflared. Switch modes any
-  time by re-running the script with/without the flag.
+  DNSSEC trust anchor) instead of forwarding over DNS-over-TLS. Switch modes
+  any time by re-running the script with/without the flag.
 - `--<service>-port N` — see the Ports table above. Both `--flag N` and
   `--flag=N` forms work.
 
@@ -128,36 +129,33 @@ Run these **on the Pi** (`dnsutils` is installed by the script). Work from the
 far end of the chain back toward the LAN:
 
 ```bash
-# 1. cloudflared DoH proxy (skip in --recursive mode)
-dig @127.0.0.1 -p 5053 example.com +short
-
-# 2. Unbound (through cloudflared in forward mode, or full recursion)
+# 1. Unbound (DoT forwarding in forward mode, or full recursion)
 dig @127.0.0.1 -p 5335 example.com +short
 
 #    DNSSEC check: should return SERVFAIL (validation working)
 dig @127.0.0.1 -p 5335 dnssec-failed.org +short
 
-# 3. AdGuard Home on port 53 (only after its wizard + re-run of provision.sh)
+# 2. AdGuard Home on port 53 (only after its wizard + re-run of provision.sh)
 dig @127.0.0.1 example.com +short
 dig @<pi-ip>  example.com +short          # from another LAN machine
 
 #    Ad blocking check: should return 0.0.0.0/NXDOMAIN once blocklists are on
 dig @127.0.0.1 doubleclick.net +short
 
-# 4. NextDNS standby listener
+# 3. NextDNS standby listener
 dig @127.0.0.1 -p 5054 example.com +short
 
-# 5. Web UIs and API
+# 4. Web UIs and API
 curl -s http://127.0.0.1:3000/ -o /dev/null -w 'adguard ui: %{http_code}\n'
 curl -s http://127.0.0.1:3001/ -o /dev/null -w 'ntopng ui:  %{http_code}\n'
 curl -s http://127.0.0.1:8787/api/v1/ping
 
-# 6. Services at a glance
-systemctl --no-pager status unbound cloudflared AdGuardHome ntopng nextdns tailscaled privacybrick-api
+# 5. Services at a glance
+systemctl --no-pager status unbound AdGuardHome ntopng nextdns tailscaled privacybrick-api
 sudo unbound-control status                 # the API uses this same channel
 tailscale status
 ```
 
 If a link fails, check its logs: `journalctl -u <unit> -e` (units: `unbound`,
-`cloudflared`, `AdGuardHome`, `ntopng`, `nextdns`, `tailscaled`,
-`privacybrick-api`).
+`AdGuardHome`, `ntopng`, `nextdns`, `tailscaled`, `privacybrick-api`) — or
+`privacybrick-logs <service>`.

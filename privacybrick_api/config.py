@@ -52,10 +52,11 @@ class Settings(BaseSettings):
     # NextDNS CLI.
     nextdns_bin: str = "nextdns"
 
-    # DoH: name of the systemd unit providing DNS-over-HTTPS upstream, if any.
-    # DietPi installs typically use cloudflared or https-dns-proxy; unbound can
-    # also forward over TLS. Leave blank to only report unbound's DoT/DoH info.
-    doh_service_unit: str = "cloudflared"
+    # Encrypted DNS: name of the systemd unit carrying the encrypted upstream.
+    # The provisioned stack uses unbound itself (native DNS-over-TLS
+    # forwarding); an https-dns-proxy-style unit also works. Leave blank when
+    # upstream DNS isn't encrypted (e.g. --recursive mode).
+    doh_service_unit: str = "unbound"
 
 
 settings = Settings()

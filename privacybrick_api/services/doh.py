@@ -1,8 +1,8 @@
-"""DNS-over-HTTPS status.
+"""Encrypted DNS status.
 
-Presented to the app as "Encrypted DNS". On a typical DietPi setup this is
-either a cloudflared/https-dns-proxy unit that unbound forwards to, or
-unbound's own TLS forwarding. We report the configured unit's health.
+Presented to the app as "Encrypted DNS". With the provisioned stack this is
+unbound itself, which forwards over DNS-over-TLS; a dedicated proxy unit
+(e.g. https-dns-proxy) also works. We report the configured unit's health.
 """
 
 from __future__ import annotations
