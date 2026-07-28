@@ -1,0 +1,24 @@
+[Unit]
+Description=PrivacyBrick local control-plane API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root is required to drive systemctl / unbound-control / tailscale / nextdns.
+# The API itself only exposes a curated, allowlisted set of operations.
+User=root
+EnvironmentFile=-/etc/privacybrick/.env
+ExecStart=/opt/privacybrick/venv/bin/privacybrick-api
+Restart=on-failure
+RestartSec=5
+
+# Hardening (paths the service genuinely needs stay writable)
+ProtectSystem=full
+ReadWritePaths=/etc/privacybrick
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
