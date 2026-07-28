@@ -508,3 +508,80 @@ def test_disable_when_never_configured_still_ok(authed, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     assert fake.posts == []
+
+
+def test_netmask_to_prefix():
+    assert dhcp.netmask_to_prefix("255.255.255.0") == 24
+    assert dhcp.netmask_to_prefix("255.255.255.192") == 26
+    assert dhcp.netmask_to_prefix("255.255.0.0") == 16
+
+
+def _nm_fake_run(calls, connections_stdout):
+    from privacybrick_api.runner import CommandResult
+
+    async def fake_run(argv, timeout=20.0):
+        calls.append(argv)
+        if argv[:2] == ["nmcli", "-t"]:
+            return CommandResult(ok=True, exit_code=0, stdout=connections_stdout, stderr="")
+        return CommandResult(ok=True, exit_code=0, stdout="", stderr="")
+
+    return fake_run
+
+
+def test_enable_pins_via_networkmanager_when_no_ifupdown(authed, monkeypatch, tmp_path):
+    """Raspberry Pi OS: empty interfaces file + NetworkManager-managed
+    interface -> pinned via nmcli, needs_reboot, no 422."""
+    test_client, headers = authed
+    _wire_route_file(monkeypatch, tmp_path)
+    interfaces_file = tmp_path / "interfaces"
+    interfaces_file.write_text("auto lo\niface lo inet loopback\n")
+    monkeypatch.setattr(dhcp, "INTERFACES_FILE", interfaces_file)
+    monkeypatch.setattr(dhcp, "INTERFACES_BACKUP", tmp_path / "interfaces.privacybrick-bak")
+    monkeypatch.setattr(dhcp, "_interface_netmask", lambda _: "255.255.255.0")
+    calls: list = []
+    monkeypatch.setattr(
+        dhcp, "run", _nm_fake_run(calls, "lo:lo\nWired connection 1:eth0\n")
+    )
+    fake = FakeAdGuard(
+        get_routes={"/control/dhcp/interfaces": ADGUARD_INTERFACES},
+        post_routes={
+            "/control/dhcp/find_active_dhcp": {
+                "v4": {"other_server": {"found": "no"}, "static_ip": {"static": "no"}}
+            },
+            "/control/dhcp/set_config": "OK.",
+        },
+    )
+    _wire_fake(monkeypatch, fake)
+    resp = test_client.post("/api/v1/dhcp/enable", json={"force": False}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["needs_reboot"] is True
+    modify = next(c for c in calls if c[:3] == ["nmcli", "connection", "modify"])
+    assert "Wired connection 1" in modify
+    assert "ipv4.method" in modify and "manual" in modify
+    addr_value = modify[modify.index("ipv4.addresses") + 1]
+    assert addr_value.endswith("/24")
+    assert interfaces_file.read_text() == "auto lo\niface lo inet loopback\n"  # untouched
+
+
+def test_enable_networkmanager_not_managing_interface_is_422(authed, monkeypatch, tmp_path):
+    test_client, headers = authed
+    _wire_route_file(monkeypatch, tmp_path)
+    interfaces_file = tmp_path / "interfaces"
+    interfaces_file.write_text("auto lo\niface lo inet loopback\n")
+    monkeypatch.setattr(dhcp, "INTERFACES_FILE", interfaces_file)
+    monkeypatch.setattr(dhcp, "INTERFACES_BACKUP", tmp_path / "interfaces.privacybrick-bak")
+    monkeypatch.setattr(dhcp, "_interface_netmask", lambda _: "255.255.255.0")
+    calls: list = []
+    monkeypatch.setattr(dhcp, "run", _nm_fake_run(calls, "lo:lo\n"))  # no eth0
+    fake = FakeAdGuard(
+        get_routes={"/control/dhcp/interfaces": ADGUARD_INTERFACES},
+        post_routes={
+            "/control/dhcp/find_active_dhcp": {
+                "v4": {"other_server": {"found": "no"}, "static_ip": {"static": "no"}}
+            }
+        },
+    )
+    _wire_fake(monkeypatch, fake)
+    resp = test_client.post("/api/v1/dhcp/enable", json={"force": False}, headers=headers)
+    assert resp.status_code == 422
+    assert "nmtui" in resp.json()["detail"]

@@ -29,6 +29,7 @@ ALLOWED_BINARIES = {
     "dietpi-update",
     "shutdown",
     "systemd-run",    # detached self-update (deploy/self-update.sh)
+    "nmcli",          # static-IP pinning on NetworkManager systems (Raspberry Pi OS)
 }
 
 DEFAULT_TIMEOUT = 20.0

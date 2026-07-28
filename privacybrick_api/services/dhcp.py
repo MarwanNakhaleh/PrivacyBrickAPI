@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from ..auth import require_token
 from ..models import ActionResponse
+from ..runner import CommandError, run
 from .adguard import _client, _proxy_error
 from .system import read_default_route
 
@@ -36,9 +37,10 @@ LEASE_DURATION_SECONDS = 86400
 SIOCGIFNETMASK = 0x891B  # Linux ioctl: get interface netmask
 
 _STATIC_IP_HINT = (
-    "Couldn't safely pin a static IP: /etc/network/interfaces doesn't contain "
-    "the expected 'iface <interface> inet dhcp' line. Set a static IP on the "
-    "device first (dietpi-config > Network Options), then try again."
+    "Couldn't safely pin a static IP: /etc/network/interfaces has no "
+    "recognizable stanza for the interface and NetworkManager isn't managing "
+    "it either. Set a static IP on the device first (dietpi-config on DietPi, "
+    "nmtui on Raspberry Pi OS), then try again."
 )
 
 
@@ -136,6 +138,53 @@ def _write_atomic(path: Path, content: str) -> None:
     tmp = path.with_name(path.name + ".privacybrick-tmp")
     tmp.write_text(content)
     tmp.replace(path)
+
+
+def netmask_to_prefix(netmask: str) -> int:
+    return ipaddress.IPv4Network(f"0.0.0.0/{netmask}").prefixlen
+
+
+# --- NetworkManager (Raspberry Pi OS) ----------------------------------------
+
+async def _nm_connection_for(iface: str) -> str | None:
+    """Name of the active NetworkManager connection on ``iface``, or None
+    when NetworkManager isn't present/running or doesn't manage it."""
+    try:
+        result = await run(["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])
+    except CommandError:
+        return None
+    if not result.ok:
+        return None
+    for line in result.stdout.splitlines():
+        # Terse mode separates with ':'; literal colons in names arrive as '\:'.
+        parts = re.split(r"(?<!\\):", line.strip())
+        if len(parts) >= 2 and parts[1] == iface:
+            return parts[0].replace("\\:", ":")
+    return None
+
+
+async def _pin_static_via_networkmanager(
+    iface: str, pi_ip: str, netmask: str, gateway: str
+) -> bool:
+    """Pin the current address via nmcli (applies at reboot/reconnect).
+    Returns False when NetworkManager isn't managing the interface, so the
+    caller can fall through to its manual-setup hint. Idempotent."""
+    conn = await _nm_connection_for(iface)
+    if conn is None:
+        return False
+    result = await run([
+        "nmcli", "connection", "modify", conn,
+        "ipv4.method", "manual",
+        "ipv4.addresses", f"{pi_ip}/{netmask_to_prefix(netmask)}",
+        "ipv4.gateway", gateway,
+        "ipv4.dns", "127.0.0.1",
+    ])
+    if not result.ok:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NetworkManager refused the static IP: {result.output}",
+        )
+    return True
 
 
 def pick_lan_interface(interfaces: dict, default_iface: str | None) -> dict | None:
@@ -289,6 +338,10 @@ async def enable(body: EnableRequest | None = None) -> dict:
             needs_reboot = True
         elif state == "static":
             pass  # user-configured static IP; trust it
+        elif await _pin_static_via_networkmanager(iface, pi_ip, netmask, gateway):
+            # Raspberry Pi OS: no ifupdown stanza, NetworkManager owns the
+            # interface — pinned via nmcli, applies at reboot.
+            needs_reboot = True
         else:
             raise HTTPException(status_code=422, detail=_STATIC_IP_HINT)
 
