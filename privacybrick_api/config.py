@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # NextDNS CLI.
     nextdns_bin: str = "nextdns"
 
+    # Where the git checkout of this repo lives on the device (recorded by
+    # deploy/install.sh). Empty disables the self-update endpoint.
+    repo_dir: str = ""
+
     # Encrypted DNS: name of the systemd unit carrying the encrypted upstream.
     # The provisioned stack uses unbound itself (native DNS-over-TLS
     # forwarding); an https-dns-proxy-style unit also works. Leave blank when

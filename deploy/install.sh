@@ -42,6 +42,17 @@ EOF
   echo "==> Wrote default config to ${STATE_DIR}/.env — edit it to add AdGuard credentials."
 fi
 
+# Record where the repo lives so the API's self-update endpoint can git-pull it.
+# Appended outside the template block above (which only runs on first install),
+# guarded so re-runs don't duplicate the line.
+if ! grep -q '^PRIVACYBRICK_REPO_DIR=' "${STATE_DIR}/.env"; then
+  {
+    echo ""
+    echo "# Where this git checkout lives (used by the in-app self-update)"
+    echo "PRIVACYBRICK_REPO_DIR=${REPO_DIR}"
+  } >> "${STATE_DIR}/.env"
+fi
+
 install -m 644 "${REPO_DIR}/deploy/privacybrick-api.service" /etc/systemd/system/privacybrick-api.service
 ln -sf "${INSTALL_DIR}/venv/bin/privacybrick-pair" /usr/local/bin/privacybrick-pair
 install -m 755 "${REPO_DIR}/deploy/privacybrick-logs" /usr/local/bin/privacybrick-logs
@@ -57,4 +68,9 @@ echo "==> PrivacyBrick API is running on port 8787."
 echo "==> To pair a phone, run:  privacybrick-pair"
 echo "==> To watch live logs, run:  privacybrick-logs   (or privacybrick-logs all)"
 echo
-"${INSTALL_DIR}/venv/bin/privacybrick-pair"
+# Only open a pairing window when someone is actually at a terminal. The
+# detached self-update (deploy/self-update.sh) also runs this script, and it
+# must NOT silently open a 5-minute window anyone on the LAN could pair with.
+if [ -t 0 ]; then
+  "${INSTALL_DIR}/venv/bin/privacybrick-pair"
+fi

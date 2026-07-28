@@ -28,6 +28,7 @@ ALLOWED_BINARIES = {
     "cat",
     "dietpi-update",
     "shutdown",
+    "systemd-run",    # detached self-update (deploy/self-update.sh)
 }
 
 DEFAULT_TIMEOUT = 20.0
