@@ -27,6 +27,29 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=settings.adguard_url, auth=auth, timeout=10.0)
 
 
+_CREDENTIALS_HINT = (
+    "Set PRIVACYBRICK_ADGUARD_USERNAME and PRIVACYBRICK_ADGUARD_PASSWORD in "
+    "/etc/privacybrick/.env on the device (the AdGuard Home admin login), "
+    "then run 'sudo systemctl restart privacybrick-api'."
+)
+
+
+def _proxy_error(exc: httpx.HTTPError) -> HTTPException:
+    """Translate an AdGuard proxy failure into something actionable.
+
+    A 401/403 from AdGuard is a credentials problem, not an availability
+    problem — calling it "unreachable" sends the user hunting in the wrong
+    direction."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
+        problem = (
+            "AdGuard Home rejected the configured admin credentials"
+            if settings.adguard_username
+            else "AdGuard Home requires its admin credentials, which aren't configured yet"
+        )
+        return HTTPException(status_code=502, detail=f"{problem}. {_CREDENTIALS_HINT}")
+    return HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+
+
 async def health() -> ServiceHealth:
     try:
         async with _client() as client:
@@ -39,6 +62,14 @@ async def health() -> ServiceHealth:
             running=data.get("running", False) and data.get("protection_enabled", False),
             detail="protecting" if data.get("protection_enabled") else "paused",
         )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (401, 403):
+            # Installed and answering — it just needs credentials.
+            return ServiceHealth(
+                id="adguard", name="Ad Blocking", running=False,
+                detail="needs AdGuard admin credentials in /etc/privacybrick/.env",
+            )
+        return ServiceHealth(id="adguard", name="Ad Blocking", running=False, installed=False, detail=str(exc))
     except httpx.HTTPError as exc:
         return ServiceHealth(id="adguard", name="Ad Blocking", running=False, installed=False, detail=str(exc))
 
@@ -51,7 +82,7 @@ async def get_status() -> dict:
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
 
 
 @router.get("/stats")
@@ -63,7 +94,7 @@ async def get_stats() -> dict:
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
     total = data.get("num_dns_queries", 0)
     blocked = data.get("num_blocked_filtering", 0)
     return {
@@ -88,7 +119,7 @@ async def set_protection(body: ProtectionRequest) -> ActionResponse:
             resp = await client.post("/control/protection", json={"enabled": body.enabled})
             resp.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
     return ActionResponse(
         ok=True, message="Ad blocking on" if body.enabled else "Ad blocking paused"
     )
@@ -106,7 +137,7 @@ async def get_querylog(limit: int = 50, search: str | None = None) -> dict:
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
     entries = []
     for item in data.get("data", []):
         reason = item.get("reason", "")
@@ -132,7 +163,7 @@ async def get_blocklists() -> dict:
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
     return {
         "blocklists": [
             {
@@ -162,7 +193,7 @@ async def add_blocklist(body: BlocklistAddRequest) -> ActionResponse:
             )
             resp.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
     return ActionResponse(ok=True, message=f"Blocklist '{body.name}' added")
 
 
@@ -180,7 +211,7 @@ async def remove_blocklist(body: BlocklistRemoveRequest) -> ActionResponse:
             )
             resp.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
     return ActionResponse(ok=True, message="Blocklist removed")
 
 
@@ -211,6 +242,6 @@ async def add_rule(body: RuleRequest) -> ActionResponse:
                 resp = await client.post("/control/filtering/set_rules", json={"rules": rules})
                 resp.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+        raise _proxy_error(exc) from exc
     verb = "allowed" if body.action == "allow" else "blocked"
     return ActionResponse(ok=True, message=f"{body.domain} {verb}")

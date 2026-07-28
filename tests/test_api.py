@@ -135,3 +135,22 @@ def test_adguard_rules_validates_domain(client):
         "/api/v1/adguard/rules", json={"domain": "ok.example.com", "action": "maybe"}, headers=headers
     )
     assert resp.status_code == 422
+
+
+def test_adguard_auth_failure_maps_to_actionable_502():
+    """A 401/403 from AdGuard is a credentials problem, not 'unreachable'."""
+    import httpx
+
+    from privacybrick_api.services import adguard
+
+    request = httpx.Request("GET", "http://127.0.0.1:3000/control/stats")
+    auth_exc = httpx.HTTPStatusError(
+        "unauthorized", request=request, response=httpx.Response(401, request=request)
+    )
+    err = adguard._proxy_error(auth_exc)
+    assert err.status_code == 502
+    assert "/etc/privacybrick/.env" in err.detail
+    assert "unreachable" not in err.detail.lower()
+
+    transport_exc = httpx.ConnectError("connection refused", request=request)
+    assert adguard._proxy_error(transport_exc).status_code == 503
