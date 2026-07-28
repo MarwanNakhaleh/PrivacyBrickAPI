@@ -53,21 +53,52 @@ With **`--recursive`**: Unbound resolves directly from the root servers
 
 ## Ports
 
-| Port | Service | Bound to | Purpose |
-|---|---|---|---|
-| 53 | AdGuard Home | 0.0.0.0 | DNS for the LAN |
-| 5335 | Unbound | 127.0.0.1 | caching resolver behind AdGuard |
-| 5053 | cloudflared | 127.0.0.1 | DoH proxy (unused with `--recursive`) |
-| 5054 | NextDNS CLI | 127.0.0.1 | alternative upstream, standby only |
-| 3000 | AdGuard Home | 0.0.0.0 | web UI / REST API |
-| 3001 | ntopng | 0.0.0.0 | web UI / REST API |
-| 8787 | PrivacyBrick API | 0.0.0.0 | control-plane API for the iOS app |
+Every port is a **default, not a requirement** — override any of them with a
+flag or environment variable (flag wins):
+
+| Default | Service | Bound to | Flag / env var | Purpose |
+|---|---|---|---|---|
+| 53 | AdGuard Home | 0.0.0.0 | `--adguard-dns-port` / `ADGUARD_DNS_PORT` | DNS for the LAN |
+| 5335 | Unbound | 127.0.0.1 | `--unbound-port` / `UNBOUND_PORT` | caching resolver behind AdGuard |
+| 5053 | cloudflared | 127.0.0.1 | `--cloudflared-port` / `CLOUDFLARED_PORT` | DoH proxy (unused with `--recursive`) |
+| 5054 | NextDNS CLI | 127.0.0.1 | `--nextdns-port` / `NEXTDNS_PORT` | alternative upstream, standby only |
+| 3000 | AdGuard Home | 0.0.0.0 | `--adguard-ui-port` / `ADGUARD_UI_PORT` | web UI / REST API |
+| 3001 | ntopng | 0.0.0.0 | `--ntopng-port` / `NTOPNG_PORT` | web UI / REST API |
+| 8787 | PrivacyBrick API | 0.0.0.0 | `--api-port` / `API_PORT` | control-plane API for the iOS app |
+
+```bash
+# Example: AdGuard UI on 6969, DNS on 54
+sudo bash deploy/provision.sh --adguard-ui-port 6969 --adguard-dns-port 54
+```
+
+Two behaviors worth knowing:
+
+- **Existing AdGuard settings are detected and adopted.** On a re-run, the
+  script reads `AdGuardHome.yaml` and, unless you explicitly passed AdGuard
+  port flags, keeps whatever ports the wizard/you already configured — and
+  syncs the API's `/etc/privacybrick/.env` to match. Explicit flags win and
+  re-patch the config.
+- **DNS on a port other than 53 has a catch**: DHCP can only hand out a DNS
+  *address* — there is no port field — so LAN devices won't use a nonstandard
+  DNS port automatically. Fine for testing; for whole-network filtering use
+  port 53 (or redirect 53 → your port with nftables on the Pi).
 
 ## Flags
 
 - `--recursive` — configure Unbound for full recursion (no forwarding,
   DNSSEC trust anchor) instead of forwarding to cloudflared. Switch modes any
   time by re-running the script with/without the flag.
+- `--<service>-port N` — see the Ports table above. Both `--flag N` and
+  `--flag=N` forms work.
+
+## Re-runs only touch what's wrong
+
+The script is convergent: each stage first checks its own end state
+(package installed? config identical? service active?) and **skips anything
+already configured properly** — a re-run after a partial failure redoes only
+the broken stages. Changing a port flag counts as "not configured properly"
+for the affected services, so they (and only they) get rewritten and
+restarted.
 
 ## Post-install manual steps
 

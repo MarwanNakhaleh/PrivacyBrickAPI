@@ -12,37 +12,95 @@
 #   sudo bash deploy/provision.sh --recursive  # Unbound does full recursion itself
 #                                              # (DNSSEC via trust anchor; cloudflared unused)
 #
+# Ports are user-designatable, as flags or environment variables (flags win):
+#   --adguard-dns-port N   (default 53,   env ADGUARD_DNS_PORT)  DNS for the LAN
+#   --adguard-ui-port N    (default 3000, env ADGUARD_UI_PORT)   AdGuard web UI
+#   --unbound-port N       (default 5335, env UNBOUND_PORT)      localhost only
+#   --cloudflared-port N   (default 5053, env CLOUDFLARED_PORT)  localhost only
+#   --nextdns-port N       (default 5054, env NEXTDNS_PORT)      localhost only
+#   --ntopng-port N        (default 3001, env NTOPNG_PORT)       ntopng web/REST UI
+#   --api-port N           (default 8787, env API_PORT)          PrivacyBrick API
+#   e.g.  sudo bash deploy/provision.sh --adguard-ui-port 6969 --adguard-dns-port 54
+#
 # Safe to re-run: every step is idempotent. Config files that already exist
 # with different content are backed up as <file>.bak.<epoch> before overwrite.
+# Re-running with different ports rewrites the configs to the new ports.
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# ── Ports used by the stack ──────────────────────────────────────────────────
-ADGUARD_DNS_PORT=53      # AdGuard Home DNS, for the LAN
-ADGUARD_UI_PORT=3000     # AdGuard Home web UI
-UNBOUND_PORT=5335        # Unbound, localhost only
-CLOUDFLARED_PORT=5053    # cloudflared DoH proxy, localhost only
-NEXTDNS_PORT=5054        # NextDNS CLI, localhost only (installed, NOT active in chain)
-NTOPNG_PORT=3001         # ntopng web/REST UI
-API_PORT=8787            # PrivacyBrick API
+# ── Ports used by the stack (env vars supply defaults, flags override) ───────
+# For the AdGuard ports we track whether the user chose them explicitly:
+# if not, a re-run ADOPTS whatever ports the wizard/user already configured
+# in AdGuardHome.yaml rather than resetting them to the defaults.
+ADGUARD_DNS_PORT_SET=0; ADGUARD_UI_PORT_SET=0
+if [ -n "${ADGUARD_DNS_PORT:-}" ]; then ADGUARD_DNS_PORT_SET=1; fi
+if [ -n "${ADGUARD_UI_PORT:-}" ]; then ADGUARD_UI_PORT_SET=1; fi
+ADGUARD_DNS_PORT="${ADGUARD_DNS_PORT:-53}"      # AdGuard Home DNS, for the LAN
+ADGUARD_UI_PORT="${ADGUARD_UI_PORT:-3000}"      # AdGuard Home web UI
+UNBOUND_PORT="${UNBOUND_PORT:-5335}"            # Unbound, localhost only
+CLOUDFLARED_PORT="${CLOUDFLARED_PORT:-5053}"    # cloudflared DoH proxy, localhost only
+NEXTDNS_PORT="${NEXTDNS_PORT:-5054}"            # NextDNS CLI (installed, NOT in chain)
+NTOPNG_PORT="${NTOPNG_PORT:-3001}"              # ntopng web/REST UI
+API_PORT="${API_PORT:-8787}"                    # PrivacyBrick API
 
 RECURSIVE=0
-for arg in "$@"; do
+while [ $# -gt 0 ]; do
+  arg="$1"
+  shift
+  # Accept both "--flag value" and "--flag=value".
   case "$arg" in
+    *=*) key="${arg%%=*}"; value="${arg#*=}"; inline=1 ;;
+    *)   key="$arg";       value="${1:-}";    inline=0 ;;
+  esac
+  case "$key" in
     --recursive) RECURSIVE=1 ;;
+    --adguard-dns-port) ADGUARD_DNS_PORT="$value"; ADGUARD_DNS_PORT_SET=1; if [ "$inline" -eq 0 ]; then shift; fi ;;
+    --adguard-ui-port)  ADGUARD_UI_PORT="$value";  ADGUARD_UI_PORT_SET=1;  if [ "$inline" -eq 0 ]; then shift; fi ;;
+    --unbound-port)     UNBOUND_PORT="$value";     if [ "$inline" -eq 0 ]; then shift; fi ;;
+    --cloudflared-port) CLOUDFLARED_PORT="$value"; if [ "$inline" -eq 0 ]; then shift; fi ;;
+    --nextdns-port)     NEXTDNS_PORT="$value";     if [ "$inline" -eq 0 ]; then shift; fi ;;
+    --ntopng-port)      NTOPNG_PORT="$value";      if [ "$inline" -eq 0 ]; then shift; fi ;;
+    --api-port)         API_PORT="$value";         if [ "$inline" -eq 0 ]; then shift; fi ;;
     -h|--help)
-      sed -n '2,17p' "${BASH_SOURCE[0]}"
+      sed -n '2,28p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
-      echo "Unknown argument: $arg (supported: --recursive)" >&2
+      echo "Unknown argument: $key (see --help for supported flags)" >&2
       exit 1
       ;;
   esac
 done
+
+# Validate ports: numeric, 1-65535, no duplicates.
+ALL_PORTS=""
+for pair in "adguard-dns:${ADGUARD_DNS_PORT}" "adguard-ui:${ADGUARD_UI_PORT}" \
+            "unbound:${UNBOUND_PORT}" "cloudflared:${CLOUDFLARED_PORT}" \
+            "nextdns:${NEXTDNS_PORT}" "ntopng:${NTOPNG_PORT}" "api:${API_PORT}"; do
+  name="${pair%%:*}"; port="${pair##*:}"
+  case "$port" in
+    ''|*[!0-9]*) echo "Invalid ${name} port: '${port}' (must be a number)" >&2; exit 1 ;;
+  esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    echo "Invalid ${name} port: ${port} (must be 1-65535)" >&2; exit 1
+  fi
+  case " $ALL_PORTS " in
+    *" $port "*) echo "Port ${port} is assigned twice — every service needs its own port." >&2; exit 1 ;;
+  esac
+  ALL_PORTS="$ALL_PORTS $port"
+done
+
+if [ "$ADGUARD_DNS_PORT" != "53" ]; then
+  echo
+  echo "NOTE: DNS port is ${ADGUARD_DNS_PORT}, not 53. Routers can only hand out a DNS *address*"
+  echo "      via DHCP — there is no port field — so LAN devices will NOT use this port"
+  echo "      automatically. Fine for testing; for whole-network filtering, move back"
+  echo "      to 53 (or redirect 53 -> ${ADGUARD_DNS_PORT} on the Pi with nftables)."
+  echo
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "This script must run as root:  sudo bash deploy/provision.sh" >&2
@@ -56,13 +114,22 @@ stage() { echo; echo "═══════════════════�
 note()  { echo "    -> $*"; }
 
 BACKED_UP=()
+CONFIG_CHANGED=0
 # write_config <path> <<'EOF' ... — writes stdin to <path>; if the file already
 # exists with different content it is backed up first (and we say so).
+# Sets CONFIG_CHANGED=1 when the file was created or its content changed,
+# CONFIG_CHANGED=0 when it was already identical — stages use this to skip
+# restarting services that are already configured correctly.
 write_config() {
   local dest="$1" tmp
   tmp="$(mktemp)"
   cat > "$tmp"
-  if [ -f "$dest" ] && ! cmp -s "$tmp" "$dest"; then
+  if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+    CONFIG_CHANGED=0
+    rm -f "$tmp"
+    return 0
+  fi
+  if [ -f "$dest" ]; then
     local bak="${dest}.bak.$(date +%s)"
     cp -a "$dest" "$bak"
     BACKED_UP+=("$bak")
@@ -70,6 +137,35 @@ write_config() {
   fi
   install -D -m 644 "$tmp" "$dest"
   rm -f "$tmp"
+  CONFIG_CHANGED=1
+}
+
+# ensure_service <unit> <config_changed> — restart only when the config
+# changed or the unit isn't running; otherwise leave a healthy service alone.
+ensure_service() {
+  local unit="$1" changed="$2"
+  systemctl enable "$unit" >/dev/null 2>&1 || true
+  if [ "$changed" -eq 1 ] || ! systemctl is-active --quiet "$unit"; then
+    systemctl restart "$unit"
+    note "${unit}: (re)started."
+  else
+    note "${unit}: already configured and running — skipping restart."
+  fi
+}
+
+# set_env_kv <file> <key> <value> — idempotently set KEY=VALUE in an env file.
+# Sets ENV_CHANGED=1 only when the value actually changed.
+set_env_kv() {
+  local file="$1" key="$2" value="$3"
+  if grep -q "^${key}=${value}$" "$file" 2>/dev/null; then
+    return 0
+  fi
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    echo "${key}=${value}" >> "$file"
+  fi
+  ENV_CHANGED=1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +202,11 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 stage "Stage 2/8: Unbound (apt) on 127.0.0.1:${UNBOUND_PORT}"
 # ─────────────────────────────────────────────────────────────────────────────
-apt-get install -y -qq unbound
+if command -v unbound >/dev/null 2>&1; then
+  note "Unbound already installed — skipping install."
+else
+  apt-get install -y -qq unbound
+fi
 
 # unbound-control is used by the PrivacyBrick API — make sure its keys exist.
 if [ ! -f /etc/unbound/unbound_control.key ]; then
@@ -178,29 +278,34 @@ forward-zone:
 EOF
 fi
 
-systemctl enable unbound >/dev/null 2>&1 || true
-systemctl restart unbound
-note "Unbound running on 127.0.0.1:${UNBOUND_PORT}."
+ensure_service unbound "$CONFIG_CHANGED"
+note "Unbound on 127.0.0.1:${UNBOUND_PORT}."
 
 # ─────────────────────────────────────────────────────────────────────────────
 stage "Stage 3/8: cloudflared DoH proxy (Cloudflare apt repo) on 127.0.0.1:${CLOUDFLARED_PORT}"
 # ─────────────────────────────────────────────────────────────────────────────
 # Official repo per https://pkg.cloudflare.com/
-if [ ! -f /usr/share/keyrings/cloudflare-main.gpg ]; then
-  curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
-    | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
-fi
-write_config /etc/apt/sources.list.d/cloudflared.list <<EOF
+if command -v cloudflared >/dev/null 2>&1; then
+  note "cloudflared already installed — skipping repo setup and install."
+else
+  if [ ! -f /usr/share/keyrings/cloudflare-main.gpg ]; then
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+      | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+  fi
+  write_config /etc/apt/sources.list.d/cloudflared.list <<EOF
 deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared ${CODENAME} main
 EOF
-apt-get update -qq
-apt-get install -y -qq cloudflared
+  apt-get update -qq
+  apt-get install -y -qq cloudflared
+fi
 
+CLOUDFLARED_CHANGED=0
 write_config /etc/default/cloudflared <<EOF
 # Installed by PrivacyBrick provision.sh — options for the cloudflared
 # DNS-over-HTTPS proxy (consumed by cloudflared.service).
 CLOUDFLARED_OPTS=--address 127.0.0.1 --port ${CLOUDFLARED_PORT} --upstream https://cloudflare-dns.com/dns-query --upstream https://dns.quad9.net/dns-query
 EOF
+if [ "$CONFIG_CHANGED" -eq 1 ]; then CLOUDFLARED_CHANGED=1; fi
 
 write_config /etc/systemd/system/cloudflared.service <<'EOF'
 # Installed by PrivacyBrick provision.sh — runs cloudflared in proxy-dns
@@ -223,9 +328,8 @@ DynamicUser=yes
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now cloudflared
-systemctl restart cloudflared
+if [ "$CONFIG_CHANGED" -eq 1 ]; then CLOUDFLARED_CHANGED=1; systemctl daemon-reload; fi
+ensure_service cloudflared "$CLOUDFLARED_CHANGED"
 if [ "$RECURSIVE" -eq 1 ]; then
   note "cloudflared installed and running on 127.0.0.1:${CLOUDFLARED_PORT}, but UNUSED in --recursive mode."
 else
@@ -248,16 +352,64 @@ systemctl enable AdGuardHome >/dev/null 2>&1 || true
 systemctl start AdGuardHome || true
 
 # AdGuard writes AdGuardHome.yaml only after its first-run wizard has been
-# completed (web UI on :3000). Once that file exists — e.g. on a re-run of
-# this script after the wizard — wire it into the chain: DNS on port 53 for
-# the LAN, upstream = local Unbound.
+# completed. Once that file exists — e.g. on a re-run of this script after
+# the wizard — reconcile it with the chain:
+#   1. DETECT the ports AdGuard is actually configured with. Unless the user
+#      explicitly chose ports (flag/env), ADOPT the detected ones — a wizard
+#      choice like UI :6969 / DNS :54 is respected, not reset to defaults.
+#   2. PATCH the config (upstream = local Unbound, LAN bind, chosen ports)
+#      only if something actually differs; a correctly-wired AdGuard is
+#      left running untouched.
 if [ -f "$AGH_YAML" ]; then
-  systemctl stop AdGuardHome || true
-  BAK="${AGH_YAML}.bak.$(date +%s)"
-  cp -a "$AGH_YAML" "$BAK"
-  BACKED_UP+=("$BAK")
-  note "Backed up existing AdGuard config to $BAK"
-  python3 - "$AGH_YAML" "$ADGUARD_DNS_PORT" "$ADGUARD_UI_PORT" "$UNBOUND_PORT" <<'PYEOF'
+  read -r CUR_UI_PORT CUR_DNS_PORT <<AGHEOF
+$(python3 - "$AGH_YAML" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    cfg = yaml.safe_load(f) or {}
+addr = str((cfg.get("http") or {}).get("address") or "")
+ui = addr.rsplit(":", 1)[1] if ":" in addr else "0"
+dns = str((cfg.get("dns") or {}).get("port") or "0")
+print(ui, dns)
+PYEOF
+)
+AGHEOF
+  if [ "$ADGUARD_UI_PORT_SET" -eq 0 ] && [ "${CUR_UI_PORT:-0}" != "0" ] \
+     && [ "$CUR_UI_PORT" != "$ADGUARD_UI_PORT" ]; then
+    note "Detected existing AdGuard web UI port :${CUR_UI_PORT} — adopting it."
+    ADGUARD_UI_PORT="$CUR_UI_PORT"
+  fi
+  if [ "$ADGUARD_DNS_PORT_SET" -eq 0 ] && [ "${CUR_DNS_PORT:-0}" != "0" ] \
+     && [ "$CUR_DNS_PORT" != "$ADGUARD_DNS_PORT" ]; then
+    note "Detected existing AdGuard DNS port :${CUR_DNS_PORT} — adopting it."
+    ADGUARD_DNS_PORT="$CUR_DNS_PORT"
+  fi
+
+  AGH_STATE="$(python3 - "$AGH_YAML" "$ADGUARD_DNS_PORT" "$ADGUARD_UI_PORT" "$UNBOUND_PORT" check <<'PYEOF'
+import sys, yaml
+path, dns_port, ui_port, unbound_port = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+with open(path) as f:
+    cfg = yaml.safe_load(f) or {}
+http_addr = str((cfg.get("http") or {}).get("address") or "")
+dns = cfg.get("dns") or {}
+ok = (
+    http_addr.endswith(":%d" % ui_port)
+    and dns.get("port") == dns_port
+    and dns.get("bind_hosts") == ["0.0.0.0"]
+    and dns.get("upstream_dns") == ["127.0.0.1:%d" % unbound_port]
+)
+print("OK" if ok else "DIFF")
+PYEOF
+)"
+  if [ "$AGH_STATE" = "OK" ]; then
+    note "AdGuard already wired (UI :${ADGUARD_UI_PORT}, DNS :${ADGUARD_DNS_PORT}, upstream Unbound) — skipping."
+    systemctl start AdGuardHome 2>/dev/null || true
+  else
+    systemctl stop AdGuardHome || true
+    BAK="${AGH_YAML}.bak.$(date +%s)"
+    cp -a "$AGH_YAML" "$BAK"
+    BACKED_UP+=("$BAK")
+    note "Backed up existing AdGuard config to $BAK"
+    python3 - "$AGH_YAML" "$ADGUARD_DNS_PORT" "$ADGUARD_UI_PORT" "$UNBOUND_PORT" <<'PYEOF'
 import sys, yaml
 path, dns_port, ui_port, unbound_port = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 with open(path) as f:
@@ -273,7 +425,8 @@ with open(path, "w") as f:
 print("    -> Patched %s: DNS 0.0.0.0:%d, UI :%d, upstream 127.0.0.1:%d"
       % (path, dns_port, ui_port, unbound_port))
 PYEOF
-  systemctl start AdGuardHome
+    systemctl start AdGuardHome
+  fi
   ADGUARD_WIRED=1
 else
   ADGUARD_WIRED=0
@@ -327,7 +480,11 @@ EOF
 touch /etc/ntopng/ntopng.start 2>/dev/null || true
 
 systemctl enable ntopng >/dev/null 2>&1 || true
-systemctl restart ntopng || note "WARNING: ntopng failed to start — check 'journalctl -u ntopng'."
+if [ "$CONFIG_CHANGED" -eq 1 ] || ! systemctl is-active --quiet ntopng; then
+  systemctl restart ntopng || note "WARNING: ntopng failed to start — check 'journalctl -u ntopng'."
+else
+  note "ntopng already configured and running — skipping restart."
+fi
 note "ntopng (${NTOP_SOURCE}) on http://${PI_IP}:${NTOPNG_PORT}, monitoring ${DEFAULT_IFACE}."
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,8 +505,12 @@ if command -v nextdns >/dev/null 2>&1; then
   #   1. nextdns config set -profile <your-profile-id>  && nextdns restart
   #   2. In AdGuard Home -> Settings -> DNS settings, replace upstream
   #      127.0.0.1:${UNBOUND_PORT} with 127.0.0.1:${NEXTDNS_PORT}.
-  nextdns config set -listen "127.0.0.1:${NEXTDNS_PORT}" >/dev/null
-  nextdns restart >/dev/null 2>&1 || nextdns start >/dev/null 2>&1 || true
+  if nextdns config 2>/dev/null | grep -q "listen 127.0.0.1:${NEXTDNS_PORT}"; then
+    note "NextDNS already listening on 127.0.0.1:${NEXTDNS_PORT} — skipping reconfigure."
+  else
+    nextdns config set -listen "127.0.0.1:${NEXTDNS_PORT}" >/dev/null
+    nextdns restart >/dev/null 2>&1 || nextdns start >/dev/null 2>&1 || true
+  fi
   note "NextDNS CLI listening on 127.0.0.1:${NEXTDNS_PORT} — standing by, not in the chain."
   note "(Switch AdGuard's upstream to 127.0.0.1:${NEXTDNS_PORT} to use it; see comments in this script.)"
 fi
@@ -358,16 +519,20 @@ fi
 stage "Stage 7/8: Tailscale (official apt repo)"
 # ─────────────────────────────────────────────────────────────────────────────
 # Official repo per https://pkgs.tailscale.com/stable/ (bookworm).
-if [ ! -f /usr/share/keyrings/tailscale-archive-keyring.gpg ]; then
-  curl -fsSL "https://pkgs.tailscale.com/stable/debian/${CODENAME}.noarmor.gpg" \
-    | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+if command -v tailscale >/dev/null 2>&1; then
+  note "Tailscale already installed — skipping repo setup and install."
+else
+  if [ ! -f /usr/share/keyrings/tailscale-archive-keyring.gpg ]; then
+    curl -fsSL "https://pkgs.tailscale.com/stable/debian/${CODENAME}.noarmor.gpg" \
+      | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+  fi
+  if [ ! -f /etc/apt/sources.list.d/tailscale.list ]; then
+    curl -fsSL "https://pkgs.tailscale.com/stable/debian/${CODENAME}.tailscale-keyring.list" \
+      | tee /etc/apt/sources.list.d/tailscale.list >/dev/null
+  fi
+  apt-get update -qq
+  apt-get install -y -qq tailscale
 fi
-if [ ! -f /etc/apt/sources.list.d/tailscale.list ]; then
-  curl -fsSL "https://pkgs.tailscale.com/stable/debian/${CODENAME}.tailscale-keyring.list" \
-    | tee /etc/apt/sources.list.d/tailscale.list >/dev/null
-fi
-apt-get update -qq
-apt-get install -y -qq tailscale
 systemctl enable --now tailscaled
 
 TAILSCALE_PENDING=0
@@ -391,6 +556,20 @@ fi
 stage "Stage 8/8: PrivacyBrick API (deploy/install.sh)"
 # ─────────────────────────────────────────────────────────────────────────────
 bash "${REPO_DIR}/deploy/install.sh"
+
+# Sync the API's config to the ports in effect this run (including AdGuard
+# ports adopted from an existing AdGuardHome.yaml). Restart only on change.
+ENV_FILE=/etc/privacybrick/.env
+ENV_CHANGED=0
+set_env_kv "$ENV_FILE" PRIVACYBRICK_ADGUARD_URL "http://127.0.0.1:${ADGUARD_UI_PORT}"
+set_env_kv "$ENV_FILE" PRIVACYBRICK_NTOPNG_URL "http://127.0.0.1:${NTOPNG_PORT}"
+set_env_kv "$ENV_FILE" PRIVACYBRICK_PORT "${API_PORT}"
+if [ "$ENV_CHANGED" -eq 1 ]; then
+  note "Updated ${ENV_FILE} to current ports — restarting privacybrick-api."
+  systemctl restart privacybrick-api
+else
+  note "${ENV_FILE} already matches current ports."
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 stage "Summary"
@@ -431,8 +610,15 @@ fi
 if [ "$TAILSCALE_PENDING" -eq 1 ]; then
   echo "    2. Authenticate Tailscale:  sudo tailscale up"
 fi
-echo "    3. Point your router's DHCP DNS server at this Pi: ${PI_IP}"
-echo "       (so every LAN device resolves through AdGuard Home)."
+if [ "$ADGUARD_DNS_PORT" = "53" ]; then
+  echo "    3. Point your router's DHCP DNS server at this Pi: ${PI_IP}"
+  echo "       (so every LAN device resolves through AdGuard Home)."
+else
+  echo "    3. NOTE: AdGuard DNS is on port ${ADGUARD_DNS_PORT}, not 53. Routers can only hand"
+  echo "       out a DNS *address* (no port), so LAN devices won't use it automatically."
+  echo "       For whole-network filtering, move AdGuard to port 53 (re-run with"
+  echo "       --adguard-dns-port 53) or redirect 53 -> ${ADGUARD_DNS_PORT} on the Pi with nftables."
+fi
 echo "    4. Optional: to use NextDNS as the upstream instead of the Unbound chain,"
 echo "       set a profile (nextdns config set -profile <id>; nextdns restart) and"
 echo "       change AdGuard's upstream to 127.0.0.1:${NEXTDNS_PORT} in its DNS settings."
