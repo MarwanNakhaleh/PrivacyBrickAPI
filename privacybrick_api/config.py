@@ -62,7 +62,13 @@ settings = Settings()
 
 
 class StateStore:
-    """Tiny JSON-file-backed store for tokens and pairing state."""
+    """Tiny JSON-file-backed store for tokens and pairing state.
+
+    The API service and the ``privacybrick-pair`` CLI are separate
+    processes, each with its own instance over the same file — so every
+    read re-loads from disk, and writes re-load before mutating. Plain
+    file I/O is plenty at this scale (one Pi, a handful of phones).
+    """
 
     def __init__(self, state_dir: Path) -> None:
         self._path = state_dir / "state.json"
@@ -89,29 +95,35 @@ class StateStore:
         return self._data.setdefault("tokens", {})
 
     def issue_token(self, client_name: str) -> str:
+        self._load()
         token = secrets.token_urlsafe(32)
         self.tokens[token] = {"client": client_name}
         self._save()
         return token
 
     def revoke_token(self, token: str) -> bool:
+        self._load()
         removed = self.tokens.pop(token, None) is not None
         if removed:
             self._save()
         return removed
 
     def is_valid_token(self, token: str) -> bool:
+        self._load()
         return token in self.tokens
 
     # --- pairing -------------------------------------------------------------
     def set_pairing(self, code: str, expires_at: float) -> None:
+        self._load()
         self._data["pairing"] = {"code": code, "expires_at": expires_at}
         self._save()
 
     def get_pairing(self) -> dict | None:
+        self._load()
         return self._data.get("pairing")
 
     def clear_pairing(self) -> None:
+        self._load()
         if self._data.pop("pairing", None) is not None:
             self._save()
 
