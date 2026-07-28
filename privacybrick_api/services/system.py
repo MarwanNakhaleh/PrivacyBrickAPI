@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import re
 import socket
 import struct
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..auth import require_token
@@ -333,30 +334,78 @@ class SshKeyRequest(BaseModel):
     public_key: str
 
 
+def build_authorized_line(key: str, client_ip: str) -> str:
+    """The authorized_keys entry for ``key``: source-restricted to the
+    installing device's IP when we know it. The IP is validated (it must
+    parse as an address) before being placed inside the from= option, so
+    nothing attacker-shaped can extend the option list."""
+    if not client_ip:
+        return key
+    try:
+        ipaddress.ip_address(client_ip)
+    except ValueError:
+        return key
+    return f'from="{client_ip}" {key}'
+
+
+def merge_authorized_keys(existing: str, blob: str, line: str) -> tuple[str | None, str]:
+    """Merge ``line`` (whose key blob is ``blob``) into authorized_keys text.
+
+    Returns (new_content_or_None, message): None content means nothing to
+    write (the key is present with the same source restriction — comment
+    differences don't count). If the key exists with a different from=
+    restriction, its line is replaced so the whitelist follows the
+    device's current address."""
+
+    def options_prefix(entry: str) -> str:
+        idx = entry.find("ssh-ed25519")
+        return entry[:idx].strip() if idx > 0 else ""
+
+    lines = existing.splitlines()
+    out: list[str] = []
+    replaced = False
+    for entry in lines:
+        if blob in entry:
+            if options_prefix(entry.strip()) == options_prefix(line):
+                return None, "Key already installed"
+            out.append(line)
+            replaced = True
+        else:
+            out.append(entry)
+    if replaced:
+        return "\n".join(out) + "\n", "SSH access updated for this device's address"
+    out.append(line)
+    return "\n".join(out) + "\n", "Key installed"
+
+
 @router.post("/ssh-key")
-async def install_ssh_key(body: SshKeyRequest) -> ActionResponse:
+async def install_ssh_key(body: SshKeyRequest, request: Request) -> ActionResponse:
     """Install an ed25519 public key for root SSH access (power-user escape
-    hatch, gated behind pairing auth)."""
+    hatch, gated behind pairing auth). The key is source-restricted via
+    from= to the caller's IP — re-posting from a new address moves the
+    restriction along."""
     try:
         key = validate_ssh_ed25519_key(body.public_key)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"Not a valid ed25519 public key: {exc}")
     # Dedupe on type + base64 blob, ignoring the comment.
     blob = " ".join(key.split(" ")[:2])
+    client_ip = request.client.host if request.client else ""
+    line = build_authorized_line(key, client_ip)
     try:
         ssh_dir = AUTHORIZED_KEYS_FILE.parent
         ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         ssh_dir.chmod(0o700)
         existing = AUTHORIZED_KEYS_FILE.read_text() if AUTHORIZED_KEYS_FILE.exists() else ""
-        if blob in existing:
-            return ActionResponse(ok=True, message="Key already installed")
-        prefix = "" if not existing or existing.endswith("\n") else "\n"
-        # O_APPEND, never a full-file rewrite: an interrupted append can only
-        # lose the new key, not previously authorized ones (SD-card power
-        # loss would otherwise risk a root lockout).
-        with open(AUTHORIZED_KEYS_FILE, "a") as handle:
-            handle.write(prefix + key + "\n")
+        content, message = merge_authorized_keys(existing, blob, line)
+        if content is not None:
+            # tmp + rename: an interrupted write must never truncate
+            # previously authorized keys (root lockout on SD-card power loss).
+            tmp = AUTHORIZED_KEYS_FILE.with_name("authorized_keys.privacybrick-tmp")
+            tmp.write_text(content)
+            tmp.chmod(0o600)
+            tmp.replace(AUTHORIZED_KEYS_FILE)
         AUTHORIZED_KEYS_FILE.chmod(0o600)
     except OSError as exc:
         raise HTTPException(status_code=503, detail=f"Couldn't write authorized_keys: {exc}")
-    return ActionResponse(ok=True, message="Key installed")
+    return ActionResponse(ok=True, message=message)

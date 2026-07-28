@@ -253,3 +253,47 @@ def test_ssh_key_endpoint_rejects_hostile_input(authed, monkeypatch, tmp_path):
     )
     assert resp.status_code == 422
     assert not keys_file.exists()
+
+
+# --- authorized_keys source restriction (from=) -------------------------------
+
+VALID_KEY = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKfV5l+KcKp0yGpXQVdU2p5DPCJqEV5U6r+xU3Rk8P0y app"
+)
+
+
+def test_build_authorized_line_restricts_to_valid_ip():
+    line = system.build_authorized_line(VALID_KEY, "10.0.0.32")
+    assert line == f'from="10.0.0.32" {VALID_KEY}'
+
+
+def test_build_authorized_line_skips_invalid_ip():
+    for bad in ("", "testclient", '1.2.3.4",command="rm -rf /', "not-an-ip"):
+        assert system.build_authorized_line(VALID_KEY, bad) == VALID_KEY
+
+
+def test_merge_appends_new_key():
+    blob = " ".join(VALID_KEY.split(" ")[:2])
+    line = system.build_authorized_line(VALID_KEY, "10.0.0.32")
+    content, message = system.merge_authorized_keys("ssh-ed25519 OTHERBLOB other\n", blob, line)
+    assert message == "Key installed"
+    assert content.endswith(line + "\n")
+    assert "OTHERBLOB" in content
+
+
+def test_merge_updates_from_restriction_when_ip_changes():
+    blob = " ".join(VALID_KEY.split(" ")[:2])
+    old = f'from="10.0.0.32" {VALID_KEY}\n'
+    new_line = system.build_authorized_line(VALID_KEY, "10.0.0.77")
+    content, message = system.merge_authorized_keys(old, blob, new_line)
+    assert "updated" in message
+    assert 'from="10.0.0.77"' in content
+    assert 'from="10.0.0.32"' not in content
+
+
+def test_merge_exact_line_is_noop():
+    blob = " ".join(VALID_KEY.split(" ")[:2])
+    line = system.build_authorized_line(VALID_KEY, "10.0.0.32")
+    content, message = system.merge_authorized_keys(line + "\n", blob, line)
+    assert content is None
+    assert message == "Key already installed"

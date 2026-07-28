@@ -53,6 +53,14 @@ if ! grep -q '^PRIVACYBRICK_REPO_DIR=' "${STATE_DIR}/.env"; then
   } >> "${STATE_DIR}/.env"
 fi
 
+# The app's Remote Console needs an SSH server; Raspberry Pi OS ships with
+# it disabled. Enable OpenSSH when present (DietPi may run Dropbear instead,
+# which is left alone — it's already on when installed).
+if systemctl cat ssh >/dev/null 2>&1; then
+  systemctl enable --now ssh >/dev/null 2>&1 || true
+  echo "==> OpenSSH server enabled (used by the app's Remote Console)."
+fi
+
 install -m 644 "${REPO_DIR}/deploy/privacybrick-api.service" /etc/systemd/system/privacybrick-api.service
 ln -sf "${INSTALL_DIR}/venv/bin/privacybrick-pair" /usr/local/bin/privacybrick-pair
 install -m 755 "${REPO_DIR}/deploy/privacybrick-logs" /usr/local/bin/privacybrick-logs
