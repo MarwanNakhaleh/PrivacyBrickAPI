@@ -173,7 +173,7 @@ stage "Stage 0/8: Preflight — base packages, detect environment"
 # ─────────────────────────────────────────────────────────────────────────────
 apt-get update -qq
 apt-get install -y -qq curl wget ca-certificates gnupg apt-transport-https \
-  dnsutils python3 python3-yaml
+  dnsutils python3 python3-yaml python3-bcrypt
 note "Architecture: ${ARCH}, Debian codename: ${CODENAME}"
 
 DEFAULT_IFACE="$(ip route show default 2>/dev/null | awk '/^default/ {print $5; exit}')"
@@ -617,6 +617,53 @@ ENV_CHANGED=0
 set_env_kv "$ENV_FILE" PRIVACYBRICK_ADGUARD_URL "http://127.0.0.1:${ADGUARD_UI_PORT}"
 set_env_kv "$ENV_FILE" PRIVACYBRICK_NTOPNG_URL "http://127.0.0.1:${NTOPNG_PORT}"
 set_env_kv "$ENV_FILE" PRIVACYBRICK_PORT "${API_PORT}"
+
+# Give the API its own AdGuard Home login: a dedicated service account with a
+# random password, created once the wizard has produced a config. No manual
+# credential wiring, and the user's own admin login stays untouched. Skipped
+# whenever .env already carries a username (user-provided or from a prior run).
+if [ -n "${AGH_UNIT:-}" ] && [ -n "${AGH_YAML:-}" ] && [ -f "$AGH_YAML" ] \
+   && ! grep -qE '^PRIVACYBRICK_ADGUARD_USERNAME=.+' "$ENV_FILE"; then
+  # If AdGuard has no users at all, its API is open — adding one would
+  # suddenly lock the web UI, so leave it alone.
+  AGH_HAS_AUTH="$(python3 - "$AGH_YAML" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1]) as f:
+    cfg = yaml.safe_load(f) or {}
+print(1 if (cfg.get("users") or []) else 0)
+PYEOF
+)"
+  if [ "$AGH_HAS_AUTH" = "1" ]; then
+    PB_AGH_USER=privacybrick
+    PB_AGH_PASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+    systemctl stop "$AGH_UNIT" || true
+    BAK="${AGH_YAML}.bak.$(date +%s)"
+    cp -a "$AGH_YAML" "$BAK"
+    BACKED_UP+=("$BAK")
+    python3 - "$AGH_YAML" "$PB_AGH_USER" "$PB_AGH_PASS" <<'PYEOF'
+import sys, yaml, bcrypt
+path, user, password = sys.argv[1:4]
+with open(path) as f:
+    cfg = yaml.safe_load(f) or {}
+users = [u for u in (cfg.get("users") or []) if u.get("name") != user]
+users.append({
+    "name": user,
+    "password": bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
+})
+cfg["users"] = users
+with open(path, "w") as f:
+    yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+print("    -> Created AdGuard service account '%s' for the API" % user)
+PYEOF
+    systemctl start "$AGH_UNIT"
+    set_env_kv "$ENV_FILE" PRIVACYBRICK_ADGUARD_USERNAME "$PB_AGH_USER"
+    set_env_kv "$ENV_FILE" PRIVACYBRICK_ADGUARD_PASSWORD "$PB_AGH_PASS"
+    note "API's AdGuard credentials written to ${ENV_FILE}."
+  else
+    note "AdGuard Home has no users configured — API needs no credentials."
+  fi
+fi
+
 if [ "$ENV_CHANGED" -eq 1 ]; then
   note "Updated ${ENV_FILE} to current ports — restarting privacybrick-api."
   systemctl restart privacybrick-api
@@ -648,17 +695,18 @@ cat <<EOF
   Still to do (manual):
 EOF
 if [ "$ADGUARD_WIRED" -eq 1 ]; then
-  echo "    1. AdGuard Home is wired to Unbound. Log in at http://${PI_IP}:${ADGUARD_UI_PORT} and put"
-  echo "       your admin credentials into /etc/privacybrick/.env"
-  echo "       (PRIVACYBRICK_ADGUARD_USERNAME / _PASSWORD), then:"
-  echo "       sudo systemctl restart privacybrick-api"
+  if grep -qE '^PRIVACYBRICK_ADGUARD_USERNAME=.+' "$ENV_FILE" 2>/dev/null; then
+    echo "    1. AdGuard Home: wired to Unbound; the API has its own AdGuard login. Nothing to do."
+  else
+    echo "    1. AdGuard Home is wired to Unbound. Log in at http://${PI_IP}:${ADGUARD_UI_PORT} and put"
+    echo "       your admin credentials into /etc/privacybrick/.env"
+    echo "       (PRIVACYBRICK_ADGUARD_USERNAME / _PASSWORD), then:"
+    echo "       sudo systemctl restart privacybrick-api"
+  fi
 else
   echo "    1. Finish AdGuard Home's first-run wizard: http://${PI_IP}:${ADGUARD_UI_PORT}"
-  echo "       (web port ${ADGUARD_UI_PORT}, DNS port ${ADGUARD_DNS_PORT}). Then RE-RUN this script to point its"
-  echo "       upstream at Unbound (127.0.0.1:${UNBOUND_PORT}) — or set that upstream in the UI."
-  echo "       Afterwards, add the admin credentials you chose to /etc/privacybrick/.env"
-  echo "       (PRIVACYBRICK_ADGUARD_USERNAME / _PASSWORD) and:"
-  echo "       sudo systemctl restart privacybrick-api"
+  echo "       (web port ${ADGUARD_UI_PORT}, DNS port ${ADGUARD_DNS_PORT}). Then RE-RUN this script: it wires the"
+  echo "       upstream to Unbound (127.0.0.1:${UNBOUND_PORT}) and creates the API's AdGuard login automatically."
 fi
 if [ "$TAILSCALE_PENDING" -eq 1 ]; then
   echo "    2. Authenticate Tailscale:  sudo tailscale up"

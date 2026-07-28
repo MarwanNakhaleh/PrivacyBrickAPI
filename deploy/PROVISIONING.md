@@ -105,13 +105,13 @@ restarted.
 1. **AdGuard Home first-run wizard** — open `http://<pi-ip>:3000`, choose web
    port **3000** and DNS port **53**, and create admin credentials. Then
    **re-run `provision.sh`**: it detects the now-existing
-   `AdGuardHome.yaml` and patches the upstream to Unbound
-   (`127.0.0.1:5335`) automatically. (Or set that upstream yourself under
-   *Settings → DNS settings*.)
-2. **API credentials** — put the AdGuard admin username/password into
-   `/etc/privacybrick/.env` (`PRIVACYBRICK_ADGUARD_USERNAME` /
-   `PRIVACYBRICK_ADGUARD_PASSWORD`, plus `PRIVACYBRICK_NTOPNG_TOKEN` if you
-   create one), then `sudo systemctl restart privacybrick-api`.
+   `AdGuardHome.yaml`, patches the upstream to Unbound (`127.0.0.1:5335`),
+   and creates a dedicated `privacybrick` AdGuard service account with a
+   random password for the API (written to `/etc/privacybrick/.env`) — no
+   manual credential wiring needed. Your own admin login is untouched.
+2. **ntopng token** *(optional)* — if you create one, put it in
+   `/etc/privacybrick/.env` (`PRIVACYBRICK_NTOPNG_TOKEN`), then
+   `sudo systemctl restart privacybrick-api`.
 3. **Tailscale login** — if the script printed an auth URL you didn't visit,
    run `sudo tailscale up` and follow the link.
 4. **Router** — point your router's DHCP DNS at the Pi's LAN IP so every

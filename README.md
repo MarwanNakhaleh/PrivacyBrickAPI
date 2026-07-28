@@ -35,8 +35,12 @@ The installer creates a venv in `/opt/privacybrick`, installs a systemd
 service (`privacybrick-api`, port **8787**), writes a config template to
 `/etc/privacybrick/.env`, and prints a pairing code.
 
-Then edit `/etc/privacybrick/.env` to add your AdGuard Home admin credentials
-(and ntopng token if you use one) and `sudo systemctl restart privacybrick-api`.
+AdGuard credentials are wired automatically: `deploy/provision.sh` creates a
+dedicated `privacybrick` service account in AdGuard Home and writes it to
+`/etc/privacybrick/.env`. (Installing the API alone with `install.sh`? Add
+your AdGuard admin login to `.env` yourself — or run `provision.sh`, which
+converges safely on an existing setup. Add `PRIVACYBRICK_NTOPNG_TOKEN` too if
+you use one, then `sudo systemctl restart privacybrick-api`.)
 
 To pair another phone later: `privacybrick-pair`
 
