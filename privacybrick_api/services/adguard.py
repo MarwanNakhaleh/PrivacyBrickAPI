@@ -7,9 +7,11 @@ the phone never sees them.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..auth import require_token
 from ..config import settings
@@ -93,11 +95,122 @@ async def set_protection(body: ProtectionRequest) -> ActionResponse:
 
 
 @router.get("/querylog")
-async def get_querylog(limit: int = 25) -> dict:
+async def get_querylog(limit: int = 50, search: str | None = None) -> dict:
+    """Recent DNS queries, reshaped for the app's activity feed."""
+    params: dict = {"limit": limit}
+    if search:
+        params["search_question_string"] = search
     try:
         async with _client() as client:
-            resp = await client.get("/control/querylog", params={"limit": limit})
+            resp = await client.get("/control/querylog", params=params)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+    entries = []
+    for item in data.get("data", []):
+        reason = item.get("reason", "")
+        entries.append(
+            {
+                "domain": (item.get("question") or {}).get("name", ""),
+                "client": item.get("client", ""),
+                "time": item.get("time", ""),
+                # "FilteredBlackList", "FilteredSafeBrowsing", ... mean blocked;
+                # "NotFilteredNotFound" etc. do not.
+                "blocked": reason.startswith("Filtered") and not reason.startswith("NotFiltered"),
+                "reason": reason,
+            }
+        )
+    return {"entries": entries}
+
+
+@router.get("/blocklists")
+async def get_blocklists() -> dict:
+    try:
+        async with _client() as client:
+            resp = await client.get("/control/filtering/status")
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+    return {
+        "blocklists": [
+            {
+                "id": f.get("id", 0),
+                "name": f.get("name", ""),
+                "url": f.get("url", ""),
+                "enabled": f.get("enabled", False),
+                "rules_count": f.get("rules_count", 0),
+            }
+            for f in data.get("filters") or []
+        ]
+    }
+
+
+class BlocklistAddRequest(BaseModel):
+    url: str
+    name: str
+
+
+@router.post("/blocklists")
+async def add_blocklist(body: BlocklistAddRequest) -> ActionResponse:
+    try:
+        async with _client() as client:
+            resp = await client.post(
+                "/control/filtering/add_url",
+                json={"url": body.url, "name": body.name, "whitelist": False},
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+    return ActionResponse(ok=True, message=f"Blocklist '{body.name}' added")
+
+
+class BlocklistRemoveRequest(BaseModel):
+    url: str
+
+
+@router.post("/blocklists/remove")
+async def remove_blocklist(body: BlocklistRemoveRequest) -> ActionResponse:
+    try:
+        async with _client() as client:
+            resp = await client.post(
+                "/control/filtering/remove_url",
+                json={"url": body.url, "whitelist": False},
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+    return ActionResponse(ok=True, message="Blocklist removed")
+
+
+# Conservative: labels of letters/digits/hyphens joined by dots. No scheme, no
+# slashes, no leading/trailing hyphens — anything else is rejected with a 422.
+_DOMAIN_PATTERN = (
+    r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?"
+    r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$"
+)
+
+
+class RuleRequest(BaseModel):
+    domain: str = Field(..., max_length=253, pattern=_DOMAIN_PATTERN)
+    action: Literal["allow", "deny"]
+
+
+@router.post("/rules")
+async def add_rule(body: RuleRequest) -> ActionResponse:
+    """Allow or block a single domain via AdGuard Home's custom user rules."""
+    rule = f"@@||{body.domain}^" if body.action == "allow" else f"||{body.domain}^"
+    try:
+        async with _client() as client:
+            resp = await client.get("/control/filtering/status")
+            resp.raise_for_status()
+            rules = list(resp.json().get("user_rules") or [])
+            if rule not in rules:
+                rules.append(rule)
+                resp = await client.post("/control/filtering/set_rules", json={"rules": rules})
+                resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail=f"AdGuard Home unreachable: {exc}")
+    verb = "allowed" if body.action == "allow" else "blocked"
+    return ActionResponse(ok=True, message=f"{body.domain} {verb}")

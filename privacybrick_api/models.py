@@ -33,3 +33,12 @@ class OverviewResponse(BaseModel):
 class ActionResponse(BaseModel):
     ok: bool
     message: str = ""
+
+
+class IdentityResponse(BaseModel):
+    device_name: str
+    version: str
+    port: int
+    lan_ip: str
+    tailscale_ips: list[str]
+    magicdns_name: str

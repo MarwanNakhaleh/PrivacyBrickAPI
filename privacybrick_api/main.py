@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from . import __version__
 from .auth import require_token, try_pair
 from .config import settings
-from .models import OverviewResponse, PairRequest, PairResponse
+from .models import IdentityResponse, OverviewResponse, PairRequest, PairResponse
 from .services import adguard, doh, nextdns, ntopng, system, tailscale, unbound
 
 try:
@@ -93,6 +93,25 @@ async def pair(body: PairRequest) -> PairResponse:
             detail="Wrong or expired code. Run 'privacybrick-pair' on the device for a new one.",
         )
     return PairResponse(token=token, device_name=settings.device_name)
+
+
+@app.get(
+    f"{API}/identity",
+    response_model=IdentityResponse,
+    dependencies=[Depends(require_token)],
+)
+async def get_identity() -> IdentityResponse:
+    """Where to reach this device — the app uses the Tailscale address for
+    remote access. Degrades gracefully when Tailscale is absent or down."""
+    tailscale_ips, magicdns_name = await tailscale.identity()
+    return IdentityResponse(
+        device_name=settings.device_name,
+        version=__version__,
+        port=settings.port,
+        lan_ip=_local_ip(),
+        tailscale_ips=tailscale_ips,
+        magicdns_name=magicdns_name,
+    )
 
 
 @app.get(

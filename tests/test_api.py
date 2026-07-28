@@ -24,6 +24,14 @@ def client(tmp_path, monkeypatch):
         yield test_client, auth
 
 
+def _pair(test_client, auth) -> dict:
+    """Pair and return auth headers for a fresh token."""
+    code = auth.open_pairing_window()
+    resp = test_client.post("/api/v1/pair", json={"code": code, "client_name": "test"})
+    assert resp.status_code == 200
+    return {"Authorization": f"Bearer {resp.json()['token']}"}
+
+
 def test_ping_is_unauthenticated(client):
     test_client, _ = client
     resp = test_client.get("/api/v1/ping")
@@ -61,3 +69,69 @@ def test_pairing_flow(client):
     # Codes are single-use.
     resp = test_client.post("/api/v1/pair", json={"code": code, "client_name": "again"})
     assert resp.status_code == 403
+
+
+def test_identity_requires_token(client):
+    test_client, _ = client
+    assert test_client.get("/api/v1/identity").status_code == 401
+
+
+def test_identity_shape(client):
+    test_client, auth = client
+    resp = test_client.get("/api/v1/identity", headers=_pair(test_client, auth))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {
+        "device_name", "version", "port", "lan_ip", "tailscale_ips", "magicdns_name"
+    }
+    assert isinstance(body["port"], int)
+    # No tailscale CLI in the test environment → graceful empty values.
+    assert body["tailscale_ips"] == []
+    assert body["magicdns_name"] == ""
+
+
+def test_adguard_endpoints_require_token(client):
+    test_client, _ = client
+    assert test_client.get("/api/v1/adguard/querylog").status_code == 401
+    assert test_client.get("/api/v1/adguard/blocklists").status_code == 401
+    assert test_client.post("/api/v1/adguard/blocklists", json={"url": "u", "name": "n"}).status_code == 401
+    assert test_client.post("/api/v1/adguard/blocklists/remove", json={"url": "u"}).status_code == 401
+    assert test_client.post(
+        "/api/v1/adguard/rules", json={"domain": "ads.example.com", "action": "deny"}
+    ).status_code == 401
+
+
+def test_adguard_unreachable_degrades_to_503(client):
+    test_client, auth = client
+    headers = _pair(test_client, auth)
+    assert test_client.get("/api/v1/adguard/querylog", headers=headers).status_code == 503
+    assert test_client.get("/api/v1/adguard/blocklists", headers=headers).status_code == 503
+    assert test_client.post(
+        "/api/v1/adguard/blocklists",
+        json={"url": "https://example.com/list.txt", "name": "Example"},
+        headers=headers,
+    ).status_code == 503
+    assert test_client.post(
+        "/api/v1/adguard/blocklists/remove",
+        json={"url": "https://example.com/list.txt"},
+        headers=headers,
+    ).status_code == 503
+    assert test_client.post(
+        "/api/v1/adguard/rules",
+        json={"domain": "ads.example.com", "action": "deny"},
+        headers=headers,
+    ).status_code == 503
+
+
+def test_adguard_rules_validates_domain(client):
+    test_client, auth = client
+    headers = _pair(test_client, auth)
+    for bad in ("http://evil.com", "evil.com/path", "-bad-.com", "no dots"):
+        resp = test_client.post(
+            "/api/v1/adguard/rules", json={"domain": bad, "action": "deny"}, headers=headers
+        )
+        assert resp.status_code == 422, bad
+    resp = test_client.post(
+        "/api/v1/adguard/rules", json={"domain": "ok.example.com", "action": "maybe"}, headers=headers
+    )
+    assert resp.status_code == 422

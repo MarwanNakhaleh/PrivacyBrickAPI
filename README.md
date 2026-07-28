@@ -60,7 +60,10 @@ the API can only run the specific binaries above, argv-style with no shell.
 - `GET /ping` — unauthenticated identity check (used during discovery)
 - `POST /pair` `{code, client_name}` → `{token}` — exchange pairing code for a bearer token
 - `GET /overview` — one call for the app's home screen: per-service health + overall "protected"
+- `GET /identity` — device name/version + LAN and Tailscale addresses (how the app learns its remote address)
 - `GET|POST /adguard/{status,stats,querylog,protection}`
+- `GET|POST /adguard/blocklists`, `POST /adguard/blocklists/remove` — manage blocklist subscriptions
+- `POST /adguard/rules` `{domain, action: allow|deny}` — allow/block a single domain
 - `GET|POST /unbound/{status,stats,flush-cache,restart}`
 - `GET|POST /doh/{status,restart}`
 - `GET|POST /tailscale/{status,up,down}`

@@ -40,6 +40,25 @@ async def health() -> ServiceHealth:
     )
 
 
+async def identity() -> tuple[list[str], str]:
+    """Best-effort (tailscale_ips, magicdns_name) for `/identity`.
+
+    Never raises — when Tailscale is missing, down, or unparseable the app
+    simply gets no remote address and falls back to the LAN.
+    """
+    try:
+        result = await run([settings.tailscale_bin, "status", "--json"])
+        if not result.ok:
+            return [], ""
+        data = json.loads(result.stdout)
+    except (CommandError, json.JSONDecodeError):
+        return [], ""
+    self_info = data.get("Self") or {}
+    ips = [str(ip) for ip in self_info.get("TailscaleIPs") or []]
+    name = str(self_info.get("DNSName") or data.get("MagicDNSSuffix") or "").rstrip(".")
+    return ips, name
+
+
 @router.get("/status")
 async def get_status() -> dict:
     try:
