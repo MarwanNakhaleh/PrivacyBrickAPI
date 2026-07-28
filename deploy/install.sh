@@ -43,6 +43,7 @@ fi
 
 install -m 644 "${REPO_DIR}/deploy/privacybrick-api.service" /etc/systemd/system/privacybrick-api.service
 ln -sf "${INSTALL_DIR}/venv/bin/privacybrick-pair" /usr/local/bin/privacybrick-pair
+install -m 755 "${REPO_DIR}/deploy/privacybrick-logs" /usr/local/bin/privacybrick-logs
 
 systemctl daemon-reload
 systemctl enable --now privacybrick-api
@@ -50,5 +51,6 @@ systemctl enable --now privacybrick-api
 echo
 echo "==> PrivacyBrick API is running on port 8787."
 echo "==> To pair a phone, run:  privacybrick-pair"
+echo "==> To watch live logs, run:  privacybrick-logs   (or privacybrick-logs all)"
 echo
 "${INSTALL_DIR}/venv/bin/privacybrick-pair"

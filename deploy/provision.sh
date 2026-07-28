@@ -339,17 +339,66 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 stage "Stage 4/8: AdGuard Home (official installer) — DNS :${ADGUARD_DNS_PORT}, UI :${ADGUARD_UI_PORT}"
 # ─────────────────────────────────────────────────────────────────────────────
-AGH_DIR=/opt/AdGuardHome
-AGH_YAML="${AGH_DIR}/AdGuardHome.yaml"
+# AdGuard may already be installed several ways (this script's official
+# installer, DietPi's dietpi-software package, a manual install), each with
+# its own service name and config location. Detect what's actually there
+# instead of assuming one layout.
+AGH_UNIT=""
+for unit in AdGuardHome adguardhome; do
+  if systemctl cat "$unit" >/dev/null 2>&1; then AGH_UNIT="$unit"; break; fi
+done
 
-if [ -x "${AGH_DIR}/AdGuardHome" ]; then
-  note "AdGuard Home already installed at ${AGH_DIR} — skipping installer."
+# Find the live config: prefer the path the systemd unit points at
+# (ExecStart's -c/--config flag, else its -w/--work-dir flag, else systemd's
+# WorkingDirectory=), then fall back to well-known install locations.
+AGH_YAML=""
+if [ -n "$AGH_UNIT" ]; then
+  UNIT_TEXT="$(systemctl cat "$AGH_UNIT" 2>/dev/null || true)"
+  # AdGuardHome's own installer (kardianos/service) writes ExecStart with
+  # each argument individually quoted ("-c" "/path/x.yaml") — strip the
+  # quotes first or the flag patterns never match.
+  EXECSTART="$(printf '%s\n' "$UNIT_TEXT" \
+    | sed -n 's/^ExecStart=//p' | head -1 | tr -d '"')"
+  AGH_YAML="$(printf '%s\n' "$EXECSTART" \
+    | sed -nE 's/.*(-c|--config)[= ]([^ ]*\.yaml).*/\2/p')"
+  if [ -z "$AGH_YAML" ]; then
+    # DietPi's unit passes the data dir via -w instead of -c, and sets no
+    # WorkingDirectory= at all.
+    WORKDIR="$(printf '%s\n' "$EXECSTART" \
+      | sed -nE 's/.*(-w|--work-dir)[= ]([^ ]*).*/\2/p')"
+    if [ -z "$WORKDIR" ]; then
+      WORKDIR="$(printf '%s\n' "$UNIT_TEXT" \
+        | sed -n 's/^WorkingDirectory=\(.*\)$/\1/p' | head -1)"
+    fi
+    if [ -n "$WORKDIR" ] && [ -f "${WORKDIR}/AdGuardHome.yaml" ]; then
+      AGH_YAML="${WORKDIR}/AdGuardHome.yaml"
+    fi
+  fi
+fi
+if [ -z "$AGH_YAML" ] || [ ! -f "$AGH_YAML" ]; then
+  AGH_YAML=""
+  for candidate in /opt/AdGuardHome/AdGuardHome.yaml \
+                   /opt/adguardhome/AdGuardHome.yaml \
+                   /mnt/dietpi_userdata/adguardhome/AdGuardHome.yaml \
+                   /etc/AdGuardHome/AdGuardHome.yaml \
+                   /etc/adguardhome/AdGuardHome.yaml; do
+    if [ -f "$candidate" ]; then AGH_YAML="$candidate"; break; fi
+  done
+fi
+
+if [ -n "$AGH_UNIT" ]; then
+  note "AdGuard Home service detected: ${AGH_UNIT} — skipping installer."
+  note "AdGuard config: ${AGH_YAML:-not found yet (wizard not completed)}"
 else
   # Official script per https://github.com/AdguardTeam/AdGuardHome
   curl -s -S -L https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -v
+  AGH_UNIT="AdGuardHome"
+  if [ -z "$AGH_YAML" ] && [ -f /opt/AdGuardHome/AdGuardHome.yaml ]; then
+    AGH_YAML=/opt/AdGuardHome/AdGuardHome.yaml
+  fi
 fi
-systemctl enable AdGuardHome >/dev/null 2>&1 || true
-systemctl start AdGuardHome || true
+systemctl enable "$AGH_UNIT" >/dev/null 2>&1 || true
+systemctl start "$AGH_UNIT" || true
 
 # AdGuard writes AdGuardHome.yaml only after its first-run wizard has been
 # completed. Once that file exists — e.g. on a re-run of this script after
@@ -366,10 +415,14 @@ $(python3 - "$AGH_YAML" <<'PYEOF'
 import sys, yaml
 with open(sys.argv[1]) as f:
     cfg = yaml.safe_load(f) or {}
-addr = str((cfg.get("http") or {}).get("address") or "")
-ui = addr.rsplit(":", 1)[1] if ":" in addr else "0"
+http = cfg.get("http") or {}
+addr = str(http.get("address") or "")
+if ":" in addr:                       # current schema: http.address "0.0.0.0:3000"
+    ui = addr.rsplit(":", 1)[1]
+else:                                 # older schema: top-level bind_port
+    ui = str(cfg.get("bind_port") or http.get("port") or "0")
 dns = str((cfg.get("dns") or {}).get("port") or "0")
-print(ui, dns)
+print(ui or "0", dns or "0")
 PYEOF
 )
 AGHEOF
@@ -402,9 +455,9 @@ PYEOF
 )"
   if [ "$AGH_STATE" = "OK" ]; then
     note "AdGuard already wired (UI :${ADGUARD_UI_PORT}, DNS :${ADGUARD_DNS_PORT}, upstream Unbound) — skipping."
-    systemctl start AdGuardHome 2>/dev/null || true
+    systemctl start "$AGH_UNIT" 2>/dev/null || true
   else
-    systemctl stop AdGuardHome || true
+    systemctl stop "$AGH_UNIT" || true
     BAK="${AGH_YAML}.bak.$(date +%s)"
     cp -a "$AGH_YAML" "$BAK"
     BACKED_UP+=("$BAK")
@@ -425,7 +478,7 @@ with open(path, "w") as f:
 print("    -> Patched %s: DNS 0.0.0.0:%d, UI :%d, upstream 127.0.0.1:%d"
       % (path, dns_port, ui_port, unbound_port))
 PYEOF
-    systemctl start AdGuardHome
+    systemctl start "$AGH_UNIT"
   fi
   ADGUARD_WIRED=1
 else

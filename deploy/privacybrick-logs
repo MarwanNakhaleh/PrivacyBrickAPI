@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# privacybrick-logs — follow live logs from the PrivacyBrick stack.
+#
+# Usage:
+#   privacybrick-logs            # live PrivacyBrick API logs (default)
+#   privacybrick-logs api        # same
+#   privacybrick-logs adguard    # AdGuard Home
+#   privacybrick-logs unbound    # Unbound (Private DNS)
+#   privacybrick-logs doh        # cloudflared (Encrypted DNS)
+#   privacybrick-logs ntopng     # ntopng (Network Monitor)
+#   privacybrick-logs nextdns    # NextDNS CLI
+#   privacybrick-logs tailscale  # tailscaled (Remote Access)
+#   privacybrick-logs all        # everything, interleaved
+#   privacybrick-logs api -n 200 # extra args pass through to journalctl
+set -euo pipefail
+
+target="${1:-api}"
+if [ $# -gt 0 ]; then shift; fi
+
+# AdGuard's unit name differs by install method.
+adguard_unit() {
+  for unit in AdGuardHome adguardhome; do
+    if systemctl cat "$unit" >/dev/null 2>&1; then echo "$unit"; return; fi
+  done
+  echo "AdGuardHome"
+}
+
+case "$target" in
+  api)       units=(-u privacybrick-api) ;;
+  adguard)   units=(-u "$(adguard_unit)") ;;
+  unbound)   units=(-u unbound) ;;
+  doh)       units=(-u cloudflared) ;;
+  ntopng)    units=(-u ntopng) ;;
+  nextdns)   units=(-u nextdns) ;;
+  tailscale) units=(-u tailscaled) ;;
+  all)       units=(-u privacybrick-api -u "$(adguard_unit)" -u unbound
+                    -u cloudflared -u ntopng -u nextdns -u tailscaled) ;;
+  -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+  *)
+    echo "Unknown service: ${target}" >&2
+    echo "Choose from: api adguard unbound doh ntopng nextdns tailscale all" >&2
+    exit 1
+    ;;
+esac
+
+# Live follow with some recent context; extra args (e.g. -n 500, --since ...)
+# pass straight through to journalctl.
+exec journalctl "${units[@]}" -f -n 100 --no-hostname "$@"
