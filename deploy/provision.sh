@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# PrivacyBrick full-stack provisioner for a FRESH DietPi (Debian bookworm, arm64/armhf).
+# PrivacyBrick full-stack provisioner for a fresh DietPi or Raspberry Pi OS
+# device (Debian bookworm or newer, arm64/armhf).
 #
 # Installs and wires: Unbound (DNS-over-TLS upstream), AdGuard Home, Tailscale,
 # ntopng, NextDNS CLI — then installs the PrivacyBrick API via deploy/install.sh.
@@ -66,7 +67,7 @@ while [ $# -gt 0 ]; do
     --ntopng-port)      NTOPNG_PORT="$value";      if [ "$inline" -eq 0 ]; then shift; fi ;;
     --api-port)         API_PORT="$value";         if [ "$inline" -eq 0 ]; then shift; fi ;;
     -h|--help)
-      sed -n '2,28p' "${BASH_SOURCE[0]}"
+      sed -n '2,27p' "${BASH_SOURCE[0]}"
       exit 0
       ;;
     *)
@@ -197,7 +198,7 @@ EOF
   systemctl restart systemd-resolved || true
   note "systemd-resolved DNSStubListener disabled (port 53 freed)."
 else
-  note "systemd-resolved not active — nothing to do (typical on DietPi)."
+  note "systemd-resolved not active — nothing to do (typical on DietPi and Raspberry Pi OS)."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

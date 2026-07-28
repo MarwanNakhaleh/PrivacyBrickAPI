@@ -1,4 +1,4 @@
-"""DietPi / system management.
+"""System management (DietPi and Raspberry Pi OS).
 
 Presented to the app as "Device": temperature, memory, disk, uptime, updates,
 router identification, SSH key install, and a (confirmed-in-app) reboot.
@@ -100,6 +100,18 @@ async def get_info() -> dict:
         if len(parts) >= 5:
             disk_percent = parts[4]
 
+    # Distro name, works on DietPi and Raspberry Pi OS alike.
+    os_name = None
+    try:
+        os_release = await run(["cat", "/etc/os-release"])
+        if os_release.ok:
+            for line in os_release.stdout.splitlines():
+                if line.startswith("PRETTY_NAME="):
+                    os_name = line.partition("=")[2].strip().strip('"') or None
+                    break
+    except CommandError:
+        pass
+
     dietpi_version = None
     try:
         version_file = await run(["cat", "/boot/dietpi/.version"])
@@ -122,6 +134,7 @@ async def get_info() -> dict:
         "memory_total_mb": mem_total,
         "memory_used_mb": mem_used,
         "disk_used_percent": disk_percent,
+        "os": os_name,
         "dietpi_version": dietpi_version,
     }
 

@@ -1,6 +1,6 @@
 # PrivacyBrickAPI
 
-The local control-plane API for a **PrivacyBrick** — a Raspberry Pi (DietPi)
+The local control-plane API for a **PrivacyBrick** — a Raspberry Pi (DietPi or Raspberry Pi OS)
 plugged into your router that runs Unbound (with DNS-over-TLS), AdGuard Home,
 Tailscale, ntopng, and the NextDNS CLI.
 

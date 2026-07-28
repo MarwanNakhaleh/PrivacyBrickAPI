@@ -1,7 +1,8 @@
 # Provisioning a PrivacyBrick from scratch
 
-`deploy/provision.sh` turns a **fresh DietPi** (Debian bookworm, arm64/armhf)
-into a complete PrivacyBrick. Run it as root from a clone of this repo:
+`deploy/provision.sh` turns a **fresh DietPi or Raspberry Pi OS** device
+(Debian bookworm or newer, arm64/armhf) into a complete PrivacyBrick. Run it
+as root from a clone of this repo:
 
 ```bash
 sudo bash deploy/provision.sh              # default: Unbound forwards over DNS-over-TLS
